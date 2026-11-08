@@ -338,7 +338,7 @@ public class SecurityAndPrivacy : LocalizedObject, IOptimizationCategory
                 new RegistryItem(
                     @"HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds",
                     "ShellFeedsTaskbarViewMode",
-                    0
+                    2
                 )
             );
 

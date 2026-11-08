@@ -128,7 +128,7 @@ public class PowerManagement : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "805F993F-67F9-4F5A-8606-998EA9087CF0",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Moderate,
         Tags = OptimizationTags.Latency | OptimizationTags.Performance
     )]
     public class DisableUSBPowerSaving : BaseOptimization
@@ -251,7 +251,7 @@ public class PowerManagement : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "EE71E993-EE41-4449-8856-84B09B2B0C46",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Risky,
         Tags = OptimizationTags.Latency | OptimizationTags.Performance | OptimizationTags.Power
     )]
     public class InstallOptimizerDuckPowerPlan : BaseOptimization
@@ -326,7 +326,7 @@ public class PowerManagement : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "D2392F86-2B35-4BA2-939B-6FF38EE18EE6",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Risky,
         Tags = OptimizationTags.Power | OptimizationTags.Performance | OptimizationTags.System
     )]
     public class DisablePowerSaving : BaseOptimization
