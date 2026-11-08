@@ -26,30 +26,25 @@ public abstract class GpuRegistryOptimization : BaseOptimization
         OptimizationContext context
     )
     {
-        foreach (
-            var gpu in context.Snapshot.Gpus.Where(g =>
-                g.Vendor == Vendor && !string.IsNullOrEmpty(g.DeviceId)
-            )
-        )
+        foreach (var gpu in context.Snapshot.Gpus.Where(g => g.Vendor == Vendor))
         {
-            if (!Gpu.TryParseDeviceIdToIndex(gpu.DeviceId, out var index))
+            // The WMI VideoControllerN ordinal is unrelated to the display class registry key.
+            // Resolve the PnP device's actual driver registration and fail closed.
+            if (!Gpu.TryResolveDriverClassPath(gpu.PnpDeviceId, out var path))
             {
                 context.Logger.LogWarning(
-                    "Invalid DeviceId for GPU {GpuName} ({DeviceId})",
+                    "No verified driver key for GPU {GpuName} ({PnpDeviceId}); skipping tweak",
                     gpu.Name,
-                    gpu.DeviceId
+                    gpu.PnpDeviceId
                 );
                 continue;
             }
-
-            var path =
-                $@"HKLM\SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{index:D4}";
 
             RegistryService.Write(context, CreateItems(path).ToArray());
             context.Logger.LogInformation(
                 "Applied {Optimization} for GPU {DeviceId}",
                 GetType().Name,
-                gpu.DeviceId
+                gpu.PnpDeviceId
             );
         }
 
@@ -64,78 +59,76 @@ public class Gpu : LocalizedObject, IOptimizationCategory
     public OptimizationCategoryOrder Order { get; init; } = OptimizationCategoryOrder.Gpu;
     public ObservableCollection<IOptimization> Optimizations { get; init; } = [];
 
+    private const string DisplayClassGuid = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+
     /// <summary>
-    ///     Parses a WMI <c>DeviceID</c> such as "VideoController1" into the zero-based registry
-    ///     index used in the Display Class registry path (for example "0000", "0001").
+    /// Parse a PnP driver's registered display-class key without relying on WMI enumeration order.
     /// </summary>
-    /// <remarks>
-    ///     <para>
-    ///         Windows stores display adapter settings under the Display Class key
-    ///         <c>{4d36e968-e325-11ce-bfc1-08002be10318}\XXXX</c>, where <c>XXXX</c> is a
-    ///         4-digit zero-padded index, for example <c>0000</c>.
-    ///     </para>
-    ///     <para>
-    ///         The <see cref="Win32_VideoController" /> WMI class provides a <c>DeviceID</c>
-    ///         property, for example <c>"VideoController1"</c>:
-    ///         <list type="bullet">
-    ///             <item>
-    ///                 <description><c>"VideoController1"</c> is index <c>0</c>.</description>
-    ///             </item>
-    ///             <item>
-    ///                 <description><c>"VideoController2"</c> is index <c>1</c>.</description>
-    ///             </item>
-    ///         </list>
-    ///     </para>
-    ///     <para>
-    ///         The mapping is required: the order of GPUs in <see cref="SystemInfo.Gpus" />
-    ///         need not match the registry index order, and using the array index would apply
-    ///         tweaks to the wrong GPU, for example the integrated one instead of the discrete.
-    ///     </para>
-    /// </remarks>
-    /// <param name="deviceId">
-    ///     The <c>DeviceID</c> string from <c>Win32_VideoController</c>, typically in the form
-    ///     <c>"VideoControllerN"</c> where <c>N</c> is a positive integer starting from 1.
-    /// </param>
-    /// <param name="index">
-    ///     On <see langword="true" />, the zero-based index to format with <c>:D4</c>, for example
-    ///     <c>0</c> as <c>"0000"</c>. On <see langword="false" />, <c>-1</c>.
-    /// </param>
-    /// <returns>
-    ///     <see langword="true" /> if <paramref name="deviceId" /> is valid and parsed;
-    ///     otherwise <see langword="false" />.
-    /// </returns>
-    /// <example>
-    ///     <code>
-    /// string deviceId = "VideoController1";
-    /// if (TryParseDeviceIdToIndex(deviceId, out int index))
-    /// {
-    ///     string regPath = $@"HKLM\...\{{4d36e968-...\}}\{index:D4}"; // gives "0000"
-    ///     Console.WriteLine($"Apply tweak to GPU at registry index: {index:D4}");
-    /// }
-    /// </code>
-    /// </example>
-    /// <seealso cref="GpuInfo.DeviceId" />
-    public static bool TryParseDeviceIdToIndex(string? deviceId, out int index)
+    public static bool TryParseDriverClassRegistration(string? registration, out string classSubkey)
     {
-        index = -1;
-        if (string.IsNullOrWhiteSpace(deviceId))
+        classSubkey = string.Empty;
+        if (string.IsNullOrWhiteSpace(registration))
             return false;
 
-        const string prefix = "VideoController";
-        if (!deviceId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        var prefix = DisplayClassGuid + @"\";
+        if (!registration.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        var numberPart = deviceId[prefix.Length..];
-        if (!int.TryParse(numberPart, out var deviceNumber) || deviceNumber <= 0)
+        var index = registration[prefix.Length..];
+        if (index.Length != 4 || !index.All(char.IsAsciiDigit))
             return false;
 
-        index = deviceNumber - 1;
+        classSubkey = @"SYSTEM\CurrentControlSet\Control\Class\" + registration;
         return true;
+    }
+
+    /// <summary>
+    /// Resolve a display adapter's real registry key from Enum\PnPDeviceId\Driver.
+    /// Missing, malformed, or inaccessible mappings are skipped, never guessed.
+    /// </summary>
+    internal static bool TryResolveDriverClassPath(string? pnpDeviceId, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(pnpDeviceId))
+            return false;
+
+        try
+        {
+            using var device = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Enum\" + pnpDeviceId
+            );
+            var registration = device?.GetValue("Driver") as string;
+            if (!TryParseDriverClassRegistration(registration, out var classSubkey))
+                return false;
+
+            using var driver = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(classSubkey);
+            if (driver is null)
+                return false;
+
+            path = @"HKLM\" + classSubkey;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (System.Security.SecurityException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (System.IO.IOException)
+        {
+            return false;
+        }
     }
 
     [Optimization(
         Id = "4433CE93-B632-4D67-AE71-0241C31099C0",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Moderate,
         Tags = OptimizationTags.Amd | OptimizationTags.Power,
         Condition = typeof(AmdGpuCondition)
     )]
@@ -194,7 +187,7 @@ public class Gpu : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "8A4B4C4D-000E-42DB-8BD7-293067F8FAE7",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Moderate,
         Tags = OptimizationTags.Amd | OptimizationTags.Latency,
         Condition = typeof(AmdGpuCondition)
     )]
@@ -214,7 +207,7 @@ public class Gpu : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "FA58802F-B98C-4E98-AA67-067C5A394296",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Risky,
         Tags = OptimizationTags.Nvidia | OptimizationTags.Power,
         Condition = typeof(NvidiaGpuCondition)
     )]
@@ -246,7 +239,7 @@ public class Gpu : LocalizedObject, IOptimizationCategory
 
     [Optimization(
         Id = "DF8739FF-E322-4958-B369-DF584BB9B0C1",
-        Risk = OptimizationRisk.Safe,
+        Risk = OptimizationRisk.Moderate,
         Tags = OptimizationTags.Intel | OptimizationTags.Latency,
         Condition = typeof(IntelGpuCondition)
     )]
